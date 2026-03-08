@@ -23,7 +23,7 @@ go install codesnppet.dev/ifmproxy@latest
 Or build from source:
 
 ```bash
-go build -o ifm-relay .
+./build.sh
 ```
 
 ## Usage
