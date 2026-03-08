@@ -8,9 +8,10 @@ import (
 )
 
 func main() {
-	lport := flag.Int("port", IFM_PORT, "Listening port")
+	lip := flag.String("ip", "", "Listening IP")
+	lport := flag.Int("port", 0, "Listening port")
 	flag.Parse()
-	model := initialModel(*lport)
+	model := initialModel(*lip, *lport)
 	p := tea.NewProgram(model)
 	if _, err := p.Run(); err != nil {
 		log.Fatalln("Fatal error: " + err.Error())

@@ -1,0 +1,1 @@
+go build -o ./dist/ifmproxy && ./dist/ifmproxy

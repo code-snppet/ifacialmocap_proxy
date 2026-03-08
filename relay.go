@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -149,10 +150,13 @@ func (r *Relay) Start() error {
 	r.conn = conn
 	r.started = true
 	r.status = STATUS_WAITING
+	r.stopCh = make(chan struct{})
+	r.stoppedCh = make(chan struct{})
 	go r.readLoop()
 
 	if r.cfg.remote != "" {
-		return r.setRemoteLocked(r.cfg.remote)
+		ip := strings.Split(r.cfg.remote, ":")[0]
+		return r.setRemoteLocked(ip)
 	}
 
 	return nil
@@ -180,6 +184,7 @@ func (r *Relay) Stop() {
 	if r.upstream != nil {
 		r.upstream.status = STATUS_STOPPED
 	}
+	r.started = false
 	close(r.stopCh)
 	conn := r.conn
 	r.mu.Unlock()
@@ -208,6 +213,16 @@ func (r *Relay) setRemoteLocked(ip string) error {
 	r.upstream = NewUpstream(addr)
 	r.cfg.remote = addr.String()
 	return r.sendHandshake()
+}
+
+func (r *Relay) SetListen(ip string, port int) error {
+	r.mu.Lock()
+	r.cfg.listen = fmt.Sprintf("%s:%d", ip, port)
+	r.mu.Unlock()
+	if r.started {
+		r.Stop()
+	}
+	return r.Start()
 }
 
 func (r *Relay) SetRemote(ip string) error {

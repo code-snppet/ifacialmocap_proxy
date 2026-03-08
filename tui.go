@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,7 +32,8 @@ type RelayUpdatedMsg struct{}
 type errMsg struct{ err error }
 
 type Model struct {
-	relay *Relay
+	appCfg AppConfig
+	relay  *Relay
 
 	screen ScreenId
 	ci     textinput.Model
@@ -42,6 +44,7 @@ type Model struct {
 
 type AppConfig struct {
 	Remote string `json:"remote"`
+	Listen string `json:"listen"`
 }
 
 const appName = "ifm-relay"
@@ -92,14 +95,14 @@ var (
 	greenStyle  = lipgloss.NewStyle().Foreground(COLOR_GREEN)
 )
 
-func initialModel(lport int) Model {
+func initialModel(ipFlag string, portFlag int) Model {
 	input := textinput.New()
 	input.Placeholder = "type ? for commands"
 	input.Focus()
 	input.CharLimit = 156
 	input.Width = 40
 	input.ShowSuggestions = true
-	input.SetSuggestions([]string{"connect <ip>", "stats", "quit"})
+	input.SetSuggestions([]string{"listen <address>", "connect <ip>", "stats", "quit"})
 
 	appCfg, _ := loadAppConfig()
 
@@ -107,10 +110,27 @@ func initialModel(lport int) Model {
 	if appCfg.Remote != "" {
 		remote = fmt.Sprintf("%s", appCfg.Remote)
 	}
-	cfg := Cfg{listen: fmt.Sprintf("0.0.0.0:%d", lport), remote: remote}
+	listen := ""
+	defaultIp := "0.0.0.0"
+	defaultPort := IFM_PORT
+	if ipFlag != "" || portFlag > 0 {
+		if ipFlag != "" {
+			defaultIp = ipFlag
+		}
+		if portFlag > 0 {
+			defaultPort = portFlag
+		}
+		listen = fmt.Sprintf("%s:%d", defaultIp, defaultPort)
+	} else if appCfg.Listen != "" {
+		listen = fmt.Sprintf("%s", appCfg.Listen)
+	} else {
+		listen = fmt.Sprintf("%s:%d", defaultIp, defaultPort)
+	}
+	cfg := Cfg{listen: listen, remote: remote}
 	relay := NewRelay(cfg)
 
 	return Model{
+		appCfg: appCfg,
 		relay:  relay,
 		ci:     input,
 		screen: SCREEN_MAIN,
@@ -247,6 +267,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "quit", "exit":
 				m.relay.Stop()
 				return m, tea.Quit
+			case "listen":
+				if len(args) > 0 {
+					addrParts := strings.Split(args[0], ":")
+					port := IFM_PORT
+					if len(addrParts) > 1 {
+						var err error
+						port, err = strconv.Atoi(addrParts[1])
+						if err != nil {
+							m.err = fmt.Errorf("invalid port: %w", err)
+							break
+						}
+					}
+					m.listenTo(addrParts[0], port)
+				}
 			case "connect":
 				if len(args) > 0 {
 					m.connectTo(args[0])
@@ -270,8 +304,22 @@ func (m *Model) connectTo(ip string) {
 		m.err = err
 		return
 	}
-	_ = saveAppConfig(AppConfig{Remote: ip})
+	m.appCfg.Remote = ip
+	_ = saveAppConfig(m.appCfg)
 	if err := m.relay.SetRemote(ip); err != nil {
+		m.err = err
+	}
+}
+
+func (m *Model) listenTo(ip string, port int) {
+	address := fmt.Sprintf("%s:%d", ip, port)
+	if _, err := net.ResolveUDPAddr("udp", address); err != nil {
+		m.err = err
+		return
+	}
+	m.appCfg.Listen = address
+	_ = saveAppConfig(m.appCfg)
+	if err := m.relay.SetListen(ip, port); err != nil {
 		m.err = err
 	}
 }
@@ -348,9 +396,10 @@ func (m Model) viewMain(snap RelaySnapshot) string {
 			lipgloss.JoinVertical(
 				lipgloss.Left,
 				sectionTitle.Render("Commands"),
-				subtleStyle.Render("  connect <ip>  set remote and start listener"),
-				subtleStyle.Render("  stats         view last packet and counters"),
-				subtleStyle.Render("  quit          exit"),
+				subtleStyle.Render("  connect <ip>      set remote ip"),
+				subtleStyle.Render("  listen <address>  set relay address ip[:port] (default: 0.0.0.0:49983)"),
+				subtleStyle.Render("  stats             view last packet and counters"),
+				subtleStyle.Render("  quit              exit"),
 			),
 		)
 	}
