@@ -22,6 +22,7 @@ var (
 	boldStyle   = lipgloss.NewStyle().Bold(true)
 	subtleStyle = lipgloss.NewStyle().
 			Foreground(COLOR_GRAY)
+	bodyStyle    = lipgloss.NewStyle().Foreground(COLOR_WHITE)
 	sectionTitle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(COLOR_GRAY)

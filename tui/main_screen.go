@@ -24,6 +24,8 @@ type MainScreen struct {
 	commands []Command
 }
 
+const DEFAULT_SCAN_SUBNET = "192.168.1.0/24"
+
 func NewMainScreen() *MainScreen {
 	ci := textinput.New()
 	ci.Placeholder = "type ? for commands"
@@ -38,6 +40,12 @@ func NewMainScreen() *MainScreen {
 			name:        "connect <address>",
 			description: "connect to an iFacialMocap device ip[:port] (default port: 49983)",
 			action:      connectCommand,
+		},
+		{
+			trigger:     "scan",
+			name:        "scan <subnet> (default: 192.168.1.0/24)",
+			description: "EXPERIMENTAL: scan for iFacialMocap devices in the subnet",
+			action:      scanCommand,
 		},
 		{
 			trigger:     "listen",
@@ -62,6 +70,12 @@ func NewMainScreen() *MainScreen {
 			name:        "stats",
 			description: "view last packet and counters",
 			action:      statsCommand,
+		},
+		{
+			trigger:     "logs",
+			name:        "logs",
+			description: "view application logs",
+			action:      logsCommand,
 		},
 		{
 			trigger:     "quit",
@@ -109,6 +123,7 @@ func (s *MainScreen) Update(app *Model, msg tea.Msg) tea.Cmd {
 				break
 			}
 			val := parts[0]
+			app.err = nil
 
 			if ip := net.ParseIP(val); ip != nil {
 				app.ConnectTo(val)
@@ -195,9 +210,14 @@ func (s *MainScreen) renderRelayStatus(snap *relay.RelaySnapshot) string {
 			upstreamStatus = relay.STATUS_WAITING
 		}
 	}
-	upstreamLine := fmt.Sprintf("  iFacialMocap  %s  %s",
+	scanning := ""
+	if snap.Scanning {
+		scanning = "Scanning..."
+	}
+	upstreamLine := fmt.Sprintf("  iFacialMocap  %s  %s  %s",
 		boldStyle.Render(upstreamAddr),
 		RenderStatus(upstreamStatus),
+		scanning,
 	)
 	if snap.Upstream != nil && upstreamStatus != relay.STATUS_STOPPED {
 		upstreamLine += subtleStyle.Render(fmt.Sprintf("  %d pkts, %s",
@@ -231,13 +251,20 @@ func (s *MainScreen) renderClientsBox(app *Model, snap *relay.RelaySnapshot) str
 	)
 }
 
-// ───────────────────── Command actions ─────────────────────
-
 func connectCommand(app *Model, args []string) tea.Cmd {
 	if len(args) == 0 {
 		return nil
 	}
 	app.ConnectTo(args[0])
+	return nil
+}
+
+func scanCommand(app *Model, args []string) tea.Cmd {
+	subnet := DEFAULT_SCAN_SUBNET
+	if len(args) > 0 {
+		subnet = args[0]
+	}
+	app.Scan(subnet)
 	return nil
 }
 
@@ -263,6 +290,10 @@ func removeCommand(app *Model, args []string) tea.Cmd {
 
 func statsCommand(app *Model, args []string) tea.Cmd {
 	return app.ChangeScreen(SCREEN_STATS)
+}
+
+func logsCommand(app *Model, args []string) tea.Cmd {
+	return app.ChangeScreen(SCREEN_LOGS)
 }
 
 func quitCommand(app *Model, args []string) tea.Cmd {

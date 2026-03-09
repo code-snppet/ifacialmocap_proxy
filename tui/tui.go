@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"codesnppet.dev/ifmproxy/logger"
 	"codesnppet.dev/ifmproxy/relay"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -21,7 +22,11 @@ const (
 	SCREEN_MAIN ScreenId = iota
 	SCREEN_STATS
 	SCREEN_REMOVE_CLIENTS
+	SCREEN_LOGS
 )
+
+const APP_NAME = "ifmproxy"
+const APP_TITLE = "iFacialMocap Proxy"
 
 type Screen interface {
 	Init(app *Model) tea.Cmd
@@ -36,6 +41,7 @@ func init() {
 		SCREEN_MAIN:           func() Screen { return NewMainScreen() },
 		SCREEN_STATS:          func() Screen { return NewStatsScreen() },
 		SCREEN_REMOVE_CLIENTS: func() Screen { return NewRemoveClientsScreen() },
+		SCREEN_LOGS:           func() Screen { return NewLogsScreen() },
 	}
 }
 
@@ -49,6 +55,7 @@ type Model struct {
 
 	screen Screen
 	err    error
+	logger *logger.Logger
 	width  int
 	height int
 
@@ -64,9 +71,7 @@ type AppConfig struct {
 	ManualAddresses []string `json:"manual_addresses"`
 }
 
-const appName = "ifm-relay"
-
-func InitialModel(ipFlag string, portFlag int) Model {
+func InitialModel(ipFlag string, portFlag int, logger *logger.Logger) Model {
 	appCfg, _ := loadAppConfig()
 
 	remote := appCfg.Remote
@@ -87,7 +92,7 @@ func InitialModel(ipFlag string, portFlag int) Model {
 		listen = fmt.Sprintf("%s:%d", defaultIp, defaultPort)
 	}
 	cfg := relay.Cfg{Listen: listen, Remote: remote}
-	r := relay.NewRelay(cfg)
+	r := relay.NewRelay(cfg, logger)
 
 	if len(appCfg.ManualAddresses) > 0 {
 		for _, addr := range appCfg.ManualAddresses {
@@ -108,6 +113,7 @@ func InitialModel(ipFlag string, portFlag int) Model {
 		AppCfg: appCfg,
 		Relay:  r,
 		screen: screen,
+		logger: logger,
 	}
 }
 
@@ -123,7 +129,7 @@ func configPath() (string, error) {
 		}
 		dir = filepath.Join(home, ".config")
 	}
-	appDir := filepath.Join(dir, appName)
+	appDir := filepath.Join(dir, APP_NAME)
 	if mkerr := os.MkdirAll(appDir, 0o755); mkerr != nil {
 		return "", mkerr
 	}
@@ -223,7 +229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	w := m.ContentWidth()
 
-	title := titleStyle.Width(w - titleStyle.GetHorizontalFrameSize()).Render("iFacialMocap Relay")
+	title := titleStyle.Width(w - titleStyle.GetHorizontalFrameSize()).Render("iFacialMocap Proxy")
 	content := m.screen.View(&m, &m.Snapshot)
 
 	return lipgloss.JoinVertical(
@@ -257,9 +263,22 @@ func (m *Model) ConnectTo(addr string) {
 	}
 	m.AppCfg.Remote = addr
 	_ = SaveAppConfig(m.AppCfg)
+	m.logger.Info(fmt.Sprintf("Connecting to %s", addr))
 	if err := m.Relay.SetRemote(ip, port); err != nil {
 		m.err = err
+		m.logger.Error(fmt.Sprintf("Failed to connect to %s: %s", addr, err))
 	}
+}
+
+func (m *Model) Scan(subnet string) {
+	_, ipnet, err := net.ParseCIDR(subnet)
+	if err != nil {
+		m.err = err
+		m.logger.Error(fmt.Sprintf("Failed to parse subnet %s: %s", subnet, err))
+		return
+	}
+
+	m.Relay.ScanSubnet(ipnet)
 }
 
 func (m *Model) ListenTo(addr string) {

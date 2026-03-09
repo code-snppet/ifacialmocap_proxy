@@ -30,10 +30,10 @@ Or build from source:
 
 ```bash
 # Start on the default iFacialMocap port (49983)
-./ifm-relay
+./ifmproxy
 
 # Start on a custom port
-./ifm-relay -port 9000
+./ifmproxy -port 9000
 ```
 
 Once running, type an IP address (or `connect <ip>`) to connect to an iFacialMocap device. Type `?` for available commands.

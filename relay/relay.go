@@ -2,12 +2,15 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"codesnppet.dev/ifmproxy/logger"
 )
 
 const (
@@ -58,6 +61,7 @@ type (
 
 type RelaySnapshot struct {
 	Status     Status
+	Scanning   bool
 	ListenAddr string
 	RemoteAddr string
 	Upstream   *Upstream
@@ -73,21 +77,24 @@ type Relay struct {
 	clients   map[string]*Client
 	started   bool
 	status    Status
+	scanning  bool
 	lastErr   error
 	notify    chan struct{}
 	stopCh    chan struct{}
 	stoppedCh chan struct{}
+	logger    *logger.Logger
 }
 
 const RELAY_NETWORK = "udp4"
 
-func NewRelay(cfg Cfg) *Relay {
+func NewRelay(cfg Cfg, logger *logger.Logger) *Relay {
 	return &Relay{
 		cfg:       cfg,
 		clients:   make(map[string]*Client),
 		notify:    make(chan struct{}, 1),
 		stopCh:    make(chan struct{}),
 		stoppedCh: make(chan struct{}),
+		logger:    logger,
 	}
 }
 
@@ -115,6 +122,7 @@ func (r *Relay) Snapshot() RelaySnapshot {
 
 	snap := RelaySnapshot{
 		Status:     r.status,
+		Scanning:   r.scanning,
 		ListenAddr: r.cfg.Listen,
 		RemoteAddr: r.cfg.Remote,
 		Clients:    make(map[string]*Client, len(r.clients)),
@@ -122,10 +130,12 @@ func (r *Relay) Snapshot() RelaySnapshot {
 	}
 	if r.upstream != nil {
 		u := *r.upstream
+		// we are making a shallow copy, the last packet is not copied
 		snap.Upstream = &u
 	}
 	for k, v := range r.clients {
 		client := *v
+		// we are making a shallow copy, the last packet is not copied
 		snap.Clients[k] = &client
 	}
 	return snap
@@ -138,6 +148,7 @@ func (r *Relay) Start() error {
 		return nil
 	}
 
+	r.logger.Info("Relay starting...")
 	laddr, err := net.ResolveUDPAddr(RELAY_NETWORK, r.cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("invalid listen addr: %w", err)
@@ -148,6 +159,7 @@ func (r *Relay) Start() error {
 		return fmt.Errorf("cannot open udp port: %w", err)
 	}
 
+	r.logger.Info(fmt.Sprintf("Relay started listening on %s", laddr.String()))
 	r.conn = conn
 	r.started = true
 	r.status = STATUS_WAITING
@@ -190,6 +202,7 @@ func (r *Relay) Stop() {
 		r.mu.Unlock()
 		return
 	}
+	r.logger.Info("Relay stopping...")
 	r.status = STATUS_STOPPED
 	if r.upstream != nil {
 		r.upstream.Status = STATUS_STOPPED
@@ -203,13 +216,50 @@ func (r *Relay) Stop() {
 		_ = conn.Close()
 	}
 	<-r.stoppedCh
+	r.logger.Info("Relay stopped")
+}
+
+func (r *Relay) ScanSubnet(ipnet *net.IPNet) {
+	r.mu.RLock()
+	wasStarted := r.started
+	isScanning := r.scanning
+	r.mu.RUnlock()
+	if isScanning {
+		return
+	}
+	if wasStarted {
+		r.Stop()
+	}
+	go func() {
+		r.mu.Lock()
+		r.scanning = true
+		r.mu.Unlock()
+		r.signal()
+		r.scanSubnetLoop(ipnet)
+		r.mu.Lock()
+		r.scanning = false
+		r.mu.Unlock()
+		r.Start()
+		r.signal()
+	}()
+}
+
+func (r *Relay) scanSubnetLoop(ipnet *net.IPNet) {
+	listenAddr, err := net.ResolveUDPAddr(RELAY_NETWORK, r.cfg.Listen)
+	if err != nil {
+		r.logger.Error(fmt.Sprintf("Error resolving listen address: %s", err))
+		return
+	}
+	finder := NewIFMDeviceFinder(ipnet, listenAddr, r.logger)
+	addr, err := finder.FindIFM(context.Background())
+	if err != nil {
+		r.logger.Error(fmt.Sprintf("Error finding IFM device: %s", err))
+		return
+	}
+	r.setRemoteLocked(addr.IP.String(), addr.Port)
 }
 
 func (r *Relay) setRemoteLocked(ip string, port int) error {
-	if !r.started {
-		return fmt.Errorf("relay not started")
-	}
-
 	if ip == "" {
 		r.upstream = nil
 		r.cfg.Remote = ""
@@ -222,23 +272,30 @@ func (r *Relay) setRemoteLocked(ip string, port int) error {
 	}
 	r.upstream = NewUpstream(addr)
 	r.cfg.Remote = addr.String()
-	return r.sendHandshake()
+	if r.started {
+		return r.sendHandshake()
+	}
+	return nil
 }
 
 func (r *Relay) SetListen(ip string, port int) error {
 	r.mu.Lock()
 	r.cfg.Listen = fmt.Sprintf("%s:%d", ip, port)
+	wasStarted := r.started
 	r.mu.Unlock()
-	if r.started {
+	if wasStarted {
 		r.Stop()
 	}
+	r.logger.Info(fmt.Sprintf("Relay setting listen to %s", r.cfg.Listen))
 	return r.Start()
 }
 
 func (r *Relay) SetRemote(ip string, port int) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.setRemoteLocked(ip, port)
+	err := r.setRemoteLocked(ip, port)
+	r.mu.Unlock()
+	r.signal()
+	return err
 }
 
 func (r *Relay) AddClient(ip string, port int) {
@@ -248,6 +305,7 @@ func (r *Relay) AddClient(ip string, port int) {
 			r.setErr(fmt.Errorf("invalid client address: %w", err))
 			return
 		}
+		r.logger.Info(fmt.Sprintf("Relay adding client %s:%d", ip, port))
 		client := NewClient(addr)
 		r.mu.Lock()
 		r.clients[addr.String()] = client
@@ -262,6 +320,7 @@ func (r *Relay) RemoveClients(clients map[string]struct{}) {
 	for k := range clients {
 		_, exists := r.clients[k]
 		if exists {
+			r.logger.Info(fmt.Sprintf("Relay removing client %s", k))
 			delete(r.clients, k)
 		}
 	}
@@ -323,6 +382,7 @@ func (r *Relay) handleHandshake(from *net.UDPAddr, data []byte) {
 	if !exists {
 		client = NewClient(from)
 		r.clients[key] = client
+		r.logger.Info(fmt.Sprintf("Relay handled handshake from %s, added client %s", from.String(), key))
 	}
 	client.Stats.LastPacket = data
 	client.Stats.LastPacketAt = time.Now()
@@ -383,6 +443,7 @@ func (r *Relay) setErr(err error) {
 	r.mu.Lock()
 	r.lastErr = err
 	r.mu.Unlock()
+	r.logger.Error(fmt.Sprintf("Relay error: %s", err))
 	r.signal()
 }
 
