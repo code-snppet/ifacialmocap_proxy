@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	"codesnppet.dev/ifmproxy/relay"
+	"codesnppet.dev/ifmproxy/network"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -29,7 +29,7 @@ func (s *StatsScreen) Update(app *Model, msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-func (s *StatsScreen) View(app *Model, snap *relay.RelaySnapshot) string {
+func (s *StatsScreen) View(app *Model, snap *network.RelaySnapshot) string {
 	bw := app.BoxWidth()
 
 	var upstreamChips string

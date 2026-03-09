@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"codesnppet.dev/ifmproxy/relay"
+	"codesnppet.dev/ifmproxy/network"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -65,7 +65,7 @@ func (s *RemoveClientsScreen) Update(app *Model, msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-func (s *RemoveClientsScreen) View(app *Model, snap *relay.RelaySnapshot) string {
+func (s *RemoveClientsScreen) View(app *Model, snap *network.RelaySnapshot) string {
 	bw := app.BoxWidth()
 
 	if len(snap.Clients) == 0 {

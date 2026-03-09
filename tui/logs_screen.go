@@ -5,13 +5,14 @@ import (
 	"strings"
 
 	"codesnppet.dev/ifmproxy/logger"
-	"codesnppet.dev/ifmproxy/relay"
+	"codesnppet.dev/ifmproxy/network"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type LogsScreen struct {
-	offset int
+	offset     int
+	autoScroll bool
 }
 
 func NewLogsScreen() *LogsScreen {
@@ -19,10 +20,8 @@ func NewLogsScreen() *LogsScreen {
 }
 
 func (s *LogsScreen) Init(app *Model) tea.Cmd {
-	entries := app.logger.Entries()
-	pageSize := s.visibleLines(app)
-	pages := len(entries) / pageSize
-	s.offset = (pages - 1) * pageSize
+	s.offset = s.maxOffset(app)
+	s.autoScroll = true
 	if s.offset < 0 {
 		s.offset = 0
 	}
@@ -30,10 +29,15 @@ func (s *LogsScreen) Init(app *Model) tea.Cmd {
 }
 
 func (s *LogsScreen) Update(app *Model, msg tea.Msg) tea.Cmd {
-	n := len(app.logger.Entries())
-
 	switch msg := msg.(type) {
+	case LogUpdatedMsg:
+		if s.autoScroll {
+			s.offset = s.maxOffset(app)
+		}
 	case tea.KeyMsg:
+		if s.autoScroll {
+			s.offset = s.maxOffset(app)
+		}
 		switch msg.String() {
 		case "esc", "q":
 			return app.ChangeScreen(SCREEN_MAIN)
@@ -67,12 +71,16 @@ func (s *LogsScreen) Update(app *Model, msg tea.Msg) tea.Cmd {
 			app.logger.Clear()
 			s.offset = 0
 		}
-		_ = n
+		if s.offset >= s.maxOffset(app) {
+			s.autoScroll = true
+		} else {
+			s.autoScroll = false
+		}
 	}
 	return nil
 }
 
-func (s *LogsScreen) View(app *Model, snap *relay.RelaySnapshot) string {
+func (s *LogsScreen) View(app *Model, snap *network.RelaySnapshot) string {
 	bw := app.BoxWidth()
 	entries := app.logger.Entries()
 
@@ -102,9 +110,14 @@ func (s *LogsScreen) View(app *Model, snap *relay.RelaySnapshot) string {
 		numbered[i] = s.renderEntry(line)
 	}
 
+	autoScroll := ""
+	if s.autoScroll {
+		autoScroll = "  auto-scrolling"
+	}
 	scrollInfo := subtleStyle.Render(fmt.Sprintf(
-		"  %d-%d of %d entries",
+		"  %d-%d of %d entries %s",
 		start+1, end, len(entries),
+		autoScroll,
 	))
 
 	hint := subtleStyle.Render("  j/k: scroll  ctrl+u/ctrl+d: page  g/G: top/bottom  c: clear  esc: back")

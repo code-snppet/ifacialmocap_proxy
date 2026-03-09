@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"codesnppet.dev/ifmproxy/relay"
+	"codesnppet.dev/ifmproxy/network"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -153,10 +153,10 @@ func (s *MainScreen) runCommand(app *Model, args []string) tea.Cmd {
 	return nil
 }
 
-func (s *MainScreen) View(app *Model, snap *relay.RelaySnapshot) string {
+func (s *MainScreen) View(app *Model, snap *network.RelaySnapshot) string {
 	bw := app.BoxWidth()
 
-	status := s.renderRelayStatus(snap)
+	status := s.renderRelayStatus(app, snap)
 	connectionBox := sectionBox.Width(bw).Render(
 		lipgloss.JoinVertical(
 			lipgloss.Left,
@@ -191,7 +191,7 @@ func (s *MainScreen) View(app *Model, snap *relay.RelaySnapshot) string {
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
 }
 
-func (s *MainScreen) renderRelayStatus(snap *relay.RelaySnapshot) string {
+func (s *MainScreen) renderRelayStatus(app *Model, snap *network.RelaySnapshot) string {
 	relayLine := fmt.Sprintf("  Relay         %s  %s",
 		boldStyle.Render(snap.ListenAddr),
 		RenderStatus(snap.Status),
@@ -201,17 +201,17 @@ func (s *MainScreen) renderRelayStatus(snap *relay.RelaySnapshot) string {
 	if upstreamAddr == "" {
 		upstreamAddr = "<not set>"
 	}
-	upstreamStatus := relay.STATUS_STOPPED
+	upstreamStatus := network.STATUS_STOPPED
 	if snap.Upstream != nil {
 		upstreamStatus = snap.Upstream.Status
 	}
-	if upstreamStatus == relay.STATUS_GOOD && snap.Upstream != nil {
+	if upstreamStatus == network.STATUS_GOOD && snap.Upstream != nil {
 		if time.Since(snap.Upstream.Stats.LastPacketAt) > time.Second {
-			upstreamStatus = relay.STATUS_WAITING
+			upstreamStatus = network.STATUS_WAITING
 		}
 	}
 	scanning := ""
-	if snap.Scanning {
+	if app.Scanning {
 		scanning = "Scanning..."
 	}
 	upstreamLine := fmt.Sprintf("  iFacialMocap  %s  %s  %s",
@@ -219,7 +219,7 @@ func (s *MainScreen) renderRelayStatus(snap *relay.RelaySnapshot) string {
 		RenderStatus(upstreamStatus),
 		scanning,
 	)
-	if snap.Upstream != nil && upstreamStatus != relay.STATUS_STOPPED {
+	if snap.Upstream != nil && upstreamStatus != network.STATUS_STOPPED {
 		upstreamLine += subtleStyle.Render(fmt.Sprintf("  %d pkts, %s",
 			snap.Upstream.Stats.Received,
 			subtleStyle.Render(RenderTimeAgo(snap.Upstream.Stats.LastPacketAt)),
@@ -229,7 +229,7 @@ func (s *MainScreen) renderRelayStatus(snap *relay.RelaySnapshot) string {
 	return lipgloss.JoinVertical(lipgloss.Left, relayLine, upstreamLine)
 }
 
-func (s *MainScreen) renderClientsBox(app *Model, snap *relay.RelaySnapshot) string {
+func (s *MainScreen) renderClientsBox(app *Model, snap *network.RelaySnapshot) string {
 	if len(snap.Clients) == 0 {
 		return subtleStyle.Render("  no clients connected")
 	}
@@ -264,8 +264,7 @@ func scanCommand(app *Model, args []string) tea.Cmd {
 	if len(args) > 0 {
 		subnet = args[0]
 	}
-	app.Scan(subnet)
-	return nil
+	return app.Scan(subnet)
 }
 
 func listenCommand(app *Model, args []string) tea.Cmd {

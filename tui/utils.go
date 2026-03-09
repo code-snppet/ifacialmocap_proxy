@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"codesnppet.dev/ifmproxy/relay"
+	"codesnppet.dev/ifmproxy/network"
 )
 
 func RenderTimeAgo(t time.Time) string {
@@ -17,7 +17,7 @@ func RenderTimeAgo(t time.Time) string {
 
 const DOT = "●"
 
-func RenderClient(client *relay.Client) string {
+func RenderClient(client *network.Client) string {
 	return fmt.Sprintf(
 		"%s %s %s %s\n",
 		boldStyle.Render(client.Addr.String()),
@@ -27,13 +27,13 @@ func RenderClient(client *relay.Client) string {
 	)
 }
 
-func RenderStatus(status relay.Status) string {
+func RenderStatus(status network.Status) string {
 	switch status {
-	case relay.STATUS_STOPPED:
+	case network.STATUS_STOPPED:
 		return redStyle.Render(DOT + " Stopped")
-	case relay.STATUS_WAITING:
+	case network.STATUS_WAITING:
 		return yellowStyle.Render(DOT + " Waiting")
-	case relay.STATUS_GOOD:
+	case network.STATUS_GOOD:
 		return greenStyle.Render(DOT + " Connected")
 	}
 	return ""

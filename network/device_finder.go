@@ -1,6 +1,7 @@
-package relay
+package network
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -34,7 +35,6 @@ func NewIFMDeviceFinder(ipnet *net.IPNet, listenAddr *net.UDPAddr, logger *logge
 	}
 }
 
-// getLocalIPs returns the set of all unicast IPs assigned to this machine.
 func getLocalIPs() map[string]struct{} {
 	out := make(map[string]struct{})
 	addrs, err := net.InterfaceAddrs()
@@ -77,14 +77,13 @@ func (d *IFMDeviceFinder) readLoop() {
 			if d.isStopping() {
 				return
 			}
-			// Deadline exceeded is expected — just retry.
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
 			d.errCh <- err
 			return
 		}
-		if n > 0 && !d.isLocalIP(from.IP) {
+		if n > 0 && !d.isLocalIP(from.IP) && bytes.HasPrefix(buf[:n], BYTES_IFM_VALID_PAYLOAD_PREFIX) {
 			d.foundChan <- from
 		}
 	}
@@ -110,6 +109,7 @@ func (d *IFMDeviceFinder) isStopping() bool {
 
 func (d *IFMDeviceFinder) FindIFM(ctx context.Context) (*net.UDPAddr, error) {
 	iterator := NewSubnetIterator(d.ipnet)
+	d.debug(fmt.Sprintf("Probing from %s to %s", iterator.Min().String(), iterator.Max().String()))
 
 	err := d.listen()
 	if err != nil {
@@ -136,15 +136,12 @@ func (d *IFMDeviceFinder) FindIFM(ctx context.Context) (*net.UDPAddr, error) {
 		}
 		addr, err := net.ResolveUDPAddr(RELAY_NETWORK, fmt.Sprintf("%s:%d", ip.String(), IFM_PORT))
 		if err != nil {
-			d.debug(fmt.Sprintf("Error resolving UDP address %s: %s", ip.String(), err))
 			continue
 		}
 		_, err = d.conn.WriteToUDP(BYTES_IFM_CONNECTION_COMMAND, addr)
 		if err != nil {
-			d.debug(fmt.Sprintf("Error writing to UDP address %s: %s", ip.String(), err))
 			continue
 		}
-		d.debug(fmt.Sprintf("Sent connection command to %s", addr.String()))
 	}
 
 	d.debug("All probes sent, waiting for IFM device response...")

@@ -1,4 +1,4 @@
-package relay
+package network
 
 import "net"
 
@@ -35,4 +35,12 @@ func (s *SubnetIterator) Reset() {
 
 func (s *SubnetIterator) Value() net.IP {
 	return uint32ToIP(s.cur)
+}
+
+func (s *SubnetIterator) Min() net.IP {
+	return uint32ToIP(s.min)
+}
+
+func (s *SubnetIterator) Max() net.IP {
+	return uint32ToIP(s.max)
 }

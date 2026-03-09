@@ -1,8 +1,7 @@
-package relay
+package network
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -19,6 +18,7 @@ const (
 	IFM_V2_STRING              = "|sendDataVersion=v2"
 	IFM_TCP_CONNECTION_COMMAND = "iFacialMocap_UDPTCP_sahuasouryya9218sauhuiayeta91555dy3719"
 	IFM_TCP_STOP_COMMAND       = "iFacialMocap_UDPTCPSTOP_sahuasouryya9218sauhuiayeta91555dy3719"
+	IFM_VALID_PAYLOAD_PREFIX   = "trackingStatus"
 )
 
 var (
@@ -26,6 +26,7 @@ var (
 	BYTES_IFM_V2_STRING              = []byte(IFM_V2_STRING)
 	BYTES_IFM_TCP_CONNECTION_COMMAND = []byte(IFM_TCP_CONNECTION_COMMAND)
 	BYTES_IFM_TCP_STOP_COMMAND       = []byte(IFM_TCP_STOP_COMMAND)
+	BYTES_IFM_VALID_PAYLOAD_PREFIX   = []byte(IFM_VALID_PAYLOAD_PREFIX)
 )
 
 type Status int
@@ -61,7 +62,6 @@ type (
 
 type RelaySnapshot struct {
 	Status     Status
-	Scanning   bool
 	ListenAddr string
 	RemoteAddr string
 	Upstream   *Upstream
@@ -77,7 +77,6 @@ type Relay struct {
 	clients   map[string]*Client
 	started   bool
 	status    Status
-	scanning  bool
 	lastErr   error
 	notify    chan struct{}
 	stopCh    chan struct{}
@@ -122,7 +121,6 @@ func (r *Relay) Snapshot() RelaySnapshot {
 
 	snap := RelaySnapshot{
 		Status:     r.status,
-		Scanning:   r.scanning,
 		ListenAddr: r.cfg.Listen,
 		RemoteAddr: r.cfg.Remote,
 		Clients:    make(map[string]*Client, len(r.clients)),
@@ -219,44 +217,16 @@ func (r *Relay) Stop() {
 	r.logger.Info("Relay stopped")
 }
 
-func (r *Relay) ScanSubnet(ipnet *net.IPNet) {
+func (r *Relay) ListenAddr() string {
 	r.mu.RLock()
-	wasStarted := r.started
-	isScanning := r.scanning
-	r.mu.RUnlock()
-	if isScanning {
-		return
-	}
-	if wasStarted {
-		r.Stop()
-	}
-	go func() {
-		r.mu.Lock()
-		r.scanning = true
-		r.mu.Unlock()
-		r.signal()
-		r.scanSubnetLoop(ipnet)
-		r.mu.Lock()
-		r.scanning = false
-		r.mu.Unlock()
-		r.Start()
-		r.signal()
-	}()
+	defer r.mu.RUnlock()
+	return r.cfg.Listen
 }
 
-func (r *Relay) scanSubnetLoop(ipnet *net.IPNet) {
-	listenAddr, err := net.ResolveUDPAddr(RELAY_NETWORK, r.cfg.Listen)
-	if err != nil {
-		r.logger.Error(fmt.Sprintf("Error resolving listen address: %s", err))
-		return
-	}
-	finder := NewIFMDeviceFinder(ipnet, listenAddr, r.logger)
-	addr, err := finder.FindIFM(context.Background())
-	if err != nil {
-		r.logger.Error(fmt.Sprintf("Error finding IFM device: %s", err))
-		return
-	}
-	r.setRemoteLocked(addr.IP.String(), addr.Port)
+func (r *Relay) IsUpstreamAlive() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.upstream != nil && r.upstream.Status == STATUS_GOOD
 }
 
 func (r *Relay) setRemoteLocked(ip string, port int) error {

@@ -1,17 +1,13 @@
 package tui
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"net"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
 	"codesnppet.dev/ifmproxy/logger"
-	"codesnppet.dev/ifmproxy/relay"
+	"codesnppet.dev/ifmproxy/network"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -31,7 +27,7 @@ const APP_TITLE = "iFacialMocap Proxy"
 type Screen interface {
 	Init(app *Model) tea.Cmd
 	Update(app *Model, msg tea.Msg) tea.Cmd
-	View(app *Model, snap *relay.RelaySnapshot) string
+	View(app *Model, snap *network.RelaySnapshot) string
 }
 
 var screens map[ScreenId]func() Screen
@@ -49,9 +45,11 @@ type RelayUpdatedMsg struct{}
 
 type errMsg struct{ err error }
 
+type LogUpdatedMsg struct{}
+
 type Model struct {
 	AppCfg AppConfig
-	Relay  *relay.Relay
+	Relay  *network.Relay
 
 	screen Screen
 	err    error
@@ -59,25 +57,23 @@ type Model struct {
 	width  int
 	height int
 
-	Snapshot      relay.RelaySnapshot
-	SortedClients []*relay.Client
-	AutoClients   []*relay.Client
-	ManualClients []*relay.Client
-}
+	Scanning       bool
+	autoConnecting bool
+	scanCancel     context.CancelFunc
 
-type AppConfig struct {
-	Remote          string   `json:"remote"`
-	Listen          string   `json:"listen"`
-	ManualAddresses []string `json:"manual_addresses"`
+	Snapshot      network.RelaySnapshot
+	SortedClients []*network.Client
+	AutoClients   []*network.Client
+	ManualClients []*network.Client
 }
 
 func InitialModel(ipFlag string, portFlag int, logger *logger.Logger) Model {
-	appCfg, _ := loadAppConfig()
+	appCfg, _ := LoadAppConfig()
 
 	remote := appCfg.Remote
 	listen := ""
 	defaultIp := "0.0.0.0"
-	defaultPort := relay.IFM_PORT
+	defaultPort := network.IFM_PORT
 	if ipFlag != "" || portFlag > 0 {
 		if ipFlag != "" {
 			defaultIp = ipFlag
@@ -91,8 +87,8 @@ func InitialModel(ipFlag string, portFlag int, logger *logger.Logger) Model {
 	} else {
 		listen = fmt.Sprintf("%s:%d", defaultIp, defaultPort)
 	}
-	cfg := relay.Cfg{Listen: listen, Remote: remote}
-	r := relay.NewRelay(cfg, logger)
+	cfg := network.Cfg{Listen: listen, Remote: remote}
+	r := network.NewRelay(cfg, logger)
 
 	if len(appCfg.ManualAddresses) > 0 {
 		for _, addr := range appCfg.ManualAddresses {
@@ -110,61 +106,12 @@ func InitialModel(ipFlag string, portFlag int, logger *logger.Logger) Model {
 	screen := screens[SCREEN_MAIN]()
 
 	return Model{
-		AppCfg: appCfg,
-		Relay:  r,
-		screen: screen,
-		logger: logger,
+		AppCfg:         appCfg,
+		Relay:          r,
+		screen:         screen,
+		logger:         logger,
+		autoConnecting: remote != "",
 	}
-}
-
-func configPath() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil || dir == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil || home == "" {
-			if err != nil {
-				return "", err
-			}
-			return "", fmt.Errorf("cannot determine config directory")
-		}
-		dir = filepath.Join(home, ".config")
-	}
-	appDir := filepath.Join(dir, APP_NAME)
-	if mkerr := os.MkdirAll(appDir, 0o755); mkerr != nil {
-		return "", mkerr
-	}
-	return filepath.Join(appDir, "config.json"), nil
-}
-
-func loadAppConfig() (AppConfig, error) {
-	var cfg AppConfig
-	p, err := configPath()
-	if err != nil {
-		return cfg, err
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
-		}
-		return cfg, err
-	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return cfg, err
-	}
-	return cfg, nil
-}
-
-func SaveAppConfig(cfg AppConfig) error {
-	p, err := configPath()
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(p, data, 0o644)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -175,20 +122,35 @@ func (m Model) Init() tea.Cmd {
 		return RelayUpdatedMsg{}
 	}
 	screenInit := m.screen.Init(&m)
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		start,
 		screenInit,
 		waitRelaySignal(m.Relay),
-	)
+		waitLogSignal(m.logger),
+	}
+	if m.autoConnecting {
+		cmds = append(cmds, scheduleAutoConnectCheck())
+	}
+	return tea.Batch(cmds...)
 }
 
-func waitRelaySignal(r *relay.Relay) tea.Cmd {
+func waitRelaySignal(r *network.Relay) tea.Cmd {
 	return func() tea.Msg {
 		_, ok := <-r.NotifyChan()
 		if !ok {
 			return nil
 		}
 		return RelayUpdatedMsg{}
+	}
+}
+
+func waitLogSignal(logger *logger.Logger) tea.Cmd {
+	return func() tea.Msg {
+		_, ok := <-logger.NotifyChan()
+		if !ok {
+			return nil
+		}
+		return LogUpdatedMsg{}
 	}
 }
 
@@ -208,7 +170,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.SortedClients, autoCount = m.sortedClients(snap.Clients)
 		m.AutoClients = m.SortedClients[:autoCount]
 		m.ManualClients = m.SortedClients[autoCount:]
+		if m.autoConnecting && m.Relay.IsUpstreamAlive() {
+			m.autoConnecting = false
+			m.logger.Info("Auto-connect: upstream is alive")
+		}
 		return m, waitRelaySignal(m.Relay)
+
+	case LogUpdatedMsg:
+		m.screen.Update(&m, msg)
+		return m, waitLogSignal(m.logger)
+
+	case ScanResultMsg:
+		cmd := m.handleScanResult(msg)
+		return m, cmd
+
+	case AutoConnectTickMsg:
+		cmd := m.handleAutoConnectTick()
+		return m, cmd
 
 	case errMsg:
 		m.err = msg.err
@@ -255,103 +233,6 @@ func (m *Model) SetErr(err error) {
 	m.err = err
 }
 
-func (m *Model) ConnectTo(addr string) {
-	ip, port, err := ToHostPort(addr, relay.IFM_PORT)
-	if err != nil {
-		m.err = err
-		return
-	}
-	m.AppCfg.Remote = addr
-	_ = SaveAppConfig(m.AppCfg)
-	m.logger.Info(fmt.Sprintf("Connecting to %s", addr))
-	if err := m.Relay.SetRemote(ip, port); err != nil {
-		m.err = err
-		m.logger.Error(fmt.Sprintf("Failed to connect to %s: %s", addr, err))
-	}
-}
-
-func (m *Model) Scan(subnet string) {
-	_, ipnet, err := net.ParseCIDR(subnet)
-	if err != nil {
-		m.err = err
-		m.logger.Error(fmt.Sprintf("Failed to parse subnet %s: %s", subnet, err))
-		return
-	}
-
-	m.Relay.ScanSubnet(ipnet)
-}
-
-func (m *Model) ListenTo(addr string) {
-	ip, port, err := ToHostPort(addr)
-	if err != nil {
-		m.err = err
-		return
-	}
-	m.AppCfg.Listen = addr
-	_ = SaveAppConfig(m.AppCfg)
-	if err := m.Relay.SetListen(ip, port); err != nil {
-		m.err = err
-	}
-}
-
-func (m *Model) AddClient(addr string) {
-	ip, port, err := ToHostPort(addr)
-	if err != nil {
-		m.err = err
-		return
-	}
-	m.AppCfg.ManualAddresses = append(m.AppCfg.ManualAddresses, addr)
-	_ = SaveAppConfig(m.AppCfg)
-
-	m.Relay.AddClient(ip, port)
-}
-
-func (m *Model) RemoveClients(selected map[string]struct{}) {
-	manualSet := make(map[string]struct{}, len(m.AppCfg.ManualAddresses))
-	for _, addr := range m.AppCfg.ManualAddresses {
-		manualSet[addr] = struct{}{}
-	}
-	for addr := range selected {
-		if _, ok := manualSet[addr]; ok {
-			delete(manualSet, addr)
-		}
-	}
-	m.AppCfg.ManualAddresses = make([]string, 0, len(manualSet))
-	for addr := range manualSet {
-		m.AppCfg.ManualAddresses = append(m.AppCfg.ManualAddresses, addr)
-	}
-	_ = SaveAppConfig(m.AppCfg)
-
-	m.Relay.RemoveClients(selected)
-}
-
-func ToHostPort(addr string, defaultPort ...int) (string, int, error) {
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-		portStr = ""
-	}
-	if ip := net.ParseIP(host); ip == nil {
-		return "", 0, fmt.Errorf("invalid ip address %s", host)
-	}
-	var port int
-	if portStr != "" {
-		port, err = strconv.Atoi(portStr)
-		if err != nil {
-			return "", 0, fmt.Errorf("invalid port: %w", err)
-		}
-	} else {
-		if len(defaultPort) == 0 {
-			return "", 0, fmt.Errorf("missing port in address %s", addr)
-		}
-		port = defaultPort[0]
-	}
-	if port <= 0 || port > 65535 {
-		return "", 0, fmt.Errorf("invalid port %d", port)
-	}
-	return host, port, nil
-}
-
 func (m Model) ContentWidth() int {
 	if m.width > 0 {
 		return m.width
@@ -371,34 +252,4 @@ func (m Model) footer() string {
 	return footerStyle.Width(w - footerStyle.GetHorizontalFrameSize()).Render(
 		errorStyle.Render(m.err.Error()),
 	)
-}
-
-func (m Model) sortedClients(clients map[string]*relay.Client) ([]*relay.Client, int) {
-	manualSet := make(map[string]struct{}, len(m.AppCfg.ManualAddresses))
-	for _, addr := range m.AppCfg.ManualAddresses {
-		manualSet[addr] = struct{}{}
-	}
-
-	auto := make([]*relay.Client, 0, len(clients))
-	manual := make([]*relay.Client, 0, len(clients))
-	for _, k := range sortedClientKeys(clients) {
-		if _, ok := manualSet[k]; ok {
-			manual = append(manual, clients[k])
-		} else {
-			auto = append(auto, clients[k])
-		}
-	}
-
-	autoCount := len(auto)
-	all := append(auto, manual...)
-	return all, autoCount
-}
-
-func sortedClientKeys(clients map[string]*relay.Client) []string {
-	addrs := make([]string, 0, len(clients))
-	for k := range clients {
-		addrs = append(addrs, k)
-	}
-	sort.Strings(addrs)
-	return addrs
 }
