@@ -1,9 +1,10 @@
-package main
+package relay
 
 import (
 	"bytes"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,21 +34,21 @@ const (
 )
 
 type Cfg struct {
-	listen string
-	remote string
+	Listen string
+	Remote string
 }
 
 type Stats struct {
-	received     int
-	sent         int
-	lastPacket   []byte
-	lastPacketAt time.Time
+	Received     int
+	Sent         int
+	LastPacket   []byte
+	LastPacketAt time.Time
 }
 
 type Node struct {
-	status Status
-	addr   *net.UDPAddr
-	stats  Stats
+	Status Status
+	Addr   *net.UDPAddr
+	Stats  Stats
 }
 
 type (
@@ -92,15 +93,15 @@ func NewRelay(cfg Cfg) *Relay {
 
 func NewUpstream(addr *net.UDPAddr) *Upstream {
 	return &Upstream{
-		status: STATUS_STOPPED,
-		addr:   addr,
+		Status: STATUS_STOPPED,
+		Addr:   addr,
 	}
 }
 
 func NewClient(addr *net.UDPAddr) *Client {
 	return &Client{
-		status: STATUS_GOOD,
-		addr:   addr,
+		Status: STATUS_GOOD,
+		Addr:   addr,
 	}
 }
 
@@ -114,8 +115,8 @@ func (r *Relay) Snapshot() RelaySnapshot {
 
 	snap := RelaySnapshot{
 		Status:     r.status,
-		ListenAddr: r.cfg.listen,
-		RemoteAddr: r.cfg.remote,
+		ListenAddr: r.cfg.Listen,
+		RemoteAddr: r.cfg.Remote,
 		Clients:    make(map[string]*Client, len(r.clients)),
 		LastErr:    r.lastErr,
 	}
@@ -137,7 +138,7 @@ func (r *Relay) Start() error {
 		return nil
 	}
 
-	laddr, err := net.ResolveUDPAddr(RELAY_NETWORK, r.cfg.listen)
+	laddr, err := net.ResolveUDPAddr(RELAY_NETWORK, r.cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("invalid listen addr: %w", err)
 	}
@@ -153,10 +154,19 @@ func (r *Relay) Start() error {
 	r.stopCh = make(chan struct{})
 	r.stoppedCh = make(chan struct{})
 	go r.readLoop()
+	go r.heartbeatLoop()
 
-	if r.cfg.remote != "" {
-		ip := strings.Split(r.cfg.remote, ":")[0]
-		return r.setRemoteLocked(ip)
+	if r.cfg.Remote != "" {
+		parts := strings.Split(r.cfg.Remote, ":")
+		ip := parts[0]
+		port := IFM_PORT
+		if len(parts) > 1 {
+			port, err = strconv.Atoi(parts[1])
+			if err != nil {
+				return fmt.Errorf("invalid remote port: %w", err)
+			}
+		}
+		return r.setRemoteLocked(ip, port)
 	}
 
 	return nil
@@ -166,11 +176,11 @@ func (r *Relay) sendHandshake() error {
 	if r.upstream == nil || r.conn == nil {
 		return nil
 	}
-	_, err := r.conn.WriteToUDP(BYTES_IFM_CONNECTION_COMMAND, r.upstream.addr)
+	_, err := r.conn.WriteToUDP(BYTES_IFM_CONNECTION_COMMAND, r.upstream.Addr)
 	if err != nil {
 		return fmt.Errorf("attempt to send handshake: %w", err)
 	}
-	r.upstream.status = STATUS_WAITING
+	r.upstream.Status = STATUS_WAITING
 	return nil
 }
 
@@ -182,7 +192,7 @@ func (r *Relay) Stop() {
 	}
 	r.status = STATUS_STOPPED
 	if r.upstream != nil {
-		r.upstream.status = STATUS_STOPPED
+		r.upstream.Status = STATUS_STOPPED
 	}
 	r.started = false
 	close(r.stopCh)
@@ -195,29 +205,29 @@ func (r *Relay) Stop() {
 	<-r.stoppedCh
 }
 
-func (r *Relay) setRemoteLocked(ip string) error {
+func (r *Relay) setRemoteLocked(ip string, port int) error {
 	if !r.started {
 		return fmt.Errorf("relay not started")
 	}
 
 	if ip == "" {
 		r.upstream = nil
-		r.cfg.remote = ""
+		r.cfg.Remote = ""
 		return nil
 	}
 
-	addr, err := net.ResolveUDPAddr(RELAY_NETWORK, fmt.Sprintf("%s:%d", ip, IFM_PORT))
+	addr, err := net.ResolveUDPAddr(RELAY_NETWORK, fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {
 		return fmt.Errorf("invalid remote address: %w", err)
 	}
 	r.upstream = NewUpstream(addr)
-	r.cfg.remote = addr.String()
+	r.cfg.Remote = addr.String()
 	return r.sendHandshake()
 }
 
 func (r *Relay) SetListen(ip string, port int) error {
 	r.mu.Lock()
-	r.cfg.listen = fmt.Sprintf("%s:%d", ip, port)
+	r.cfg.Listen = fmt.Sprintf("%s:%d", ip, port)
 	r.mu.Unlock()
 	if r.started {
 		r.Stop()
@@ -225,10 +235,47 @@ func (r *Relay) SetListen(ip string, port int) error {
 	return r.Start()
 }
 
-func (r *Relay) SetRemote(ip string) error {
+func (r *Relay) SetRemote(ip string, port int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.setRemoteLocked(ip)
+	return r.setRemoteLocked(ip, port)
+}
+
+func (r *Relay) AddClient(ip string, port int) {
+	go func() {
+		addr, err := net.ResolveUDPAddr(RELAY_NETWORK, fmt.Sprintf("%s:%d", ip, port))
+		if err != nil {
+			r.setErr(fmt.Errorf("invalid client address: %w", err))
+			return
+		}
+		client := NewClient(addr)
+		r.mu.Lock()
+		r.clients[addr.String()] = client
+		r.mu.Unlock()
+		r.signal()
+	}()
+}
+
+func (r *Relay) RemoveClients(clients map[string]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k := range clients {
+		_, exists := r.clients[k]
+		if exists {
+			delete(r.clients, k)
+		}
+	}
+	r.signal()
+}
+
+func (r *Relay) heartbeatLoop() {
+	for {
+		if r.isStopping() {
+			return
+		}
+		r.sendHandshake()
+		time.Sleep(10 * time.Second)
+	}
 }
 
 func (r *Relay) readLoop() {
@@ -277,9 +324,9 @@ func (r *Relay) handleHandshake(from *net.UDPAddr, data []byte) {
 		client = NewClient(from)
 		r.clients[key] = client
 	}
-	client.stats.lastPacket = data
-	client.stats.lastPacketAt = time.Now()
-	client.stats.received++
+	client.Stats.LastPacket = data
+	client.Stats.LastPacketAt = time.Now()
+	client.Stats.Received++
 	r.status = STATUS_GOOD
 	r.lastErr = nil
 	r.mu.Unlock()
@@ -293,7 +340,7 @@ func (r *Relay) handleDataPacket(from *net.UDPAddr, data []byte) {
 		r.mu.RUnlock()
 		return
 	}
-	if r.upstream != nil && !from.IP.Equal(r.upstream.addr.IP) {
+	if !from.IP.Equal(r.upstream.Addr.IP) {
 		r.mu.RUnlock()
 		return
 	}
@@ -306,10 +353,10 @@ func (r *Relay) handleDataPacket(from *net.UDPAddr, data []byte) {
 
 	relayedTo := make([]*Client, 0, len(clientsCopy))
 	for key, client := range clientsCopy {
-		if addrEquals(from, client.addr) {
+		if addrEquals(from, client.Addr) {
 			continue
 		}
-		if _, werr := r.conn.WriteToUDP(data, client.addr); werr != nil {
+		if _, werr := r.conn.WriteToUDP(data, client.Addr); werr != nil {
 			r.setErr(fmt.Errorf("write to %s: %w", key, werr))
 			continue
 		}
@@ -319,13 +366,13 @@ func (r *Relay) handleDataPacket(from *net.UDPAddr, data []byte) {
 	r.mu.Lock()
 	r.status = STATUS_GOOD
 	r.lastErr = nil
-	r.upstream.status = STATUS_GOOD
-	r.upstream.stats.received++
-	r.upstream.stats.lastPacket = data
-	r.upstream.stats.lastPacketAt = time.Now()
+	r.upstream.Status = STATUS_GOOD
+	r.upstream.Stats.Received++
+	r.upstream.Stats.LastPacket = data
+	r.upstream.Stats.LastPacketAt = time.Now()
 	for _, client := range relayedTo {
-		client.stats.sent++
-		client.status = STATUS_GOOD
+		client.Stats.Sent++
+		client.Status = STATUS_GOOD
 	}
 	r.mu.Unlock()
 
