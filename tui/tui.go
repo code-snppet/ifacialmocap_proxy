@@ -235,8 +235,6 @@ func (m Model) View() string {
 	)
 }
 
-// ───────────────────── Model helpers ─────────────────────
-
 func (m *Model) ChangeScreen(id ScreenId) tea.Cmd {
 	newScreenFunc, ok := screens[id]
 	if !ok {
